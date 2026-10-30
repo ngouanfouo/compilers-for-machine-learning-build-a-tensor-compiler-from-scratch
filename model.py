@@ -166,8 +166,99 @@ class UOp:
             return f"UOp({self.op.name}, {self.dtype}, {src_repr}, arg={self.arg})"
         return f"UOp({self.op.name}, {self.dtype}, {src_repr})"
 
-# Step 2 - bounds (not yet solved)
-# TODO: implement
+# Step 2 - bounds
+import functools
+import math
+
+@functools.lru_cache(maxsize=None)
+def bounds(u):
+    # Floats (and anything not int/bool) are unknown.
+    if u.dtype not in (dtypes.int32, dtypes.bool):
+        return (-INF, INF)
+
+    op = u.op
+
+    if op is Ops.CONST:
+        v = u.arg
+        if isinstance(v, bool):
+            v = int(v)
+        return (v, v)
+
+    if op in (Ops.RANGE, Ops.SPECIAL):
+        n = u.src[0].arg
+        return (0, n - 1)
+
+    if op is Ops.ADD:
+        a = bounds(u.src[0])
+        b = bounds(u.src[1])
+        return (a[0] + b[0], a[1] + b[1])
+
+    if op is Ops.MUL:
+        a = bounds(u.src[0])
+        b = bounds(u.src[1])
+        candidates = []
+        for x in a:
+            for y in b:
+                if (x == 0 and math.isinf(y)) or (y == 0 and math.isinf(x)):
+                    continue
+                candidates.append(x * y)
+        if not candidates:
+            return (-INF, INF)
+        return (min(candidates), max(candidates))
+
+    if op is Ops.MAX:
+        a = bounds(u.src[0])
+        b = bounds(u.src[1])
+        return (max(a[0], b[0]), max(a[1], b[1]))
+
+    if op is Ops.IDIV:
+        a = bounds(u.src[0])
+        c = u.src[1].arg
+        if c > 0:
+            return (math.floor(a[0] / c), math.floor(a[1] / c))
+        return (-INF, INF)
+
+    if op is Ops.MOD:
+        a = bounds(u.src[0])
+        c = u.src[1].arg
+        if c > 0:
+            if 0 <= a[0] and a[1] < c:
+                return a
+            return (0, c - 1)
+        return (-INF, INF)
+
+    if op is Ops.CMPLT:
+        a = bounds(u.src[0])
+        b = bounds(u.src[1])
+        if a[1] < b[0]:
+            return (1, 1)
+        if a[0] >= b[1]:
+            return (0, 0)
+        return (0, 1)
+
+    if op is Ops.AND:
+        a = bounds(u.src[0])
+        b = bounds(u.src[1])
+        if a[0] == 1 and b[0] == 1:
+            return (1, 1)
+        if a[1] == 0 or b[1] == 0:
+            return (0, 0)
+        return (0, 1)
+
+    if op is Ops.WHERE:
+        cond = bounds(u.src[0])
+        a = bounds(u.src[1])
+        b = bounds(u.src[2])
+        if cond == (1, 1):
+            return a
+        if cond == (0, 0):
+            return b
+        return (min(a[0], b[0]), max(a[1], b[1]))
+
+    if op is Ops.CAST:
+        return bounds(u.src[0])
+
+    return (-INF, INF)
 
 # Step 3 - UPat (not yet solved)
 # TODO: implement

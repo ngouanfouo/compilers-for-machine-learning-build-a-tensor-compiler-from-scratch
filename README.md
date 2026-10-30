@@ -11,7 +11,7 @@ python scaffold.py
 ## Steps
 
 - [x] **1.** UOp
-- [ ] **2.** bounds
+- [x] **2.** bounds
 - [ ] **3.** UPat
 - [ ] **4.** graph_rewrite
 - [ ] **5.** exec_alu
