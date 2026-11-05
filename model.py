@@ -328,8 +328,34 @@ class PatternMatcher:
                     return result
         return None
 
-# Step 4 - graph_rewrite (not yet solved)
-# TODO: implement
+# Step 4 - graph_rewrite
+import functools
+
+
+def graph_rewrite(root, pm):
+    @functools.cache
+    def rw(u):
+        # 1) rewrite sources first (bottom-up)
+        old_src = tuple(u.src) if u.src is not None else ()
+        srcs = tuple(rw(s) for s in old_src)
+
+        # 2) rebuild with new sources only when something actually changed.
+        #    The UOp constructor hash-conses, so this preserves canonical identity.
+        ret = UOp(u.op, u.dtype, srcs, u.arg) if srcs != old_src else u
+
+        # 3) fixed-point loop at the current node
+        for _ in range(1000):
+            rewritten = pm.rewrite(ret)
+            if rewritten is None:
+                break
+            # the replacement's sources may be unprocessed
+            ret = rw(rewritten) if rewritten.src else rewritten
+            # stop when the rule returned a node that rw maps to itself
+            if ret is rewritten:
+                break
+        return ret
+
+    return rw(root)
 
 # Step 5 - exec_alu (not yet solved)
 # TODO: implement

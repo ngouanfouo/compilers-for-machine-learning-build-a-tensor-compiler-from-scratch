@@ -13,7 +13,7 @@ python scaffold.py
 - [x] **1.** UOp
 - [x] **2.** bounds
 - [x] **3.** UPat
-- [ ] **4.** graph_rewrite
+- [x] **4.** graph_rewrite
 - [ ] **5.** exec_alu
 - [ ] **6.** fold_div
 - [ ] **7.** make_symbolic
