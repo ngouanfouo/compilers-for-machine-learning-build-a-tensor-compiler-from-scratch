@@ -357,8 +357,121 @@ def graph_rewrite(root, pm):
 
     return rw(root)
 
-# Step 5 - exec_alu (not yet solved)
-# TODO: implement
+# Step 5 - exec_alu
+import math
+
+
+def exec_alu(op, dtype, vals):
+    if op == Ops.ADD:
+        result = vals[0] + vals[1]
+    elif op == Ops.MUL:
+        result = vals[0] * vals[1]
+    elif op == Ops.MAX:
+        result = max(vals[0], vals[1])
+    elif op == Ops.CMPLT:
+        result = vals[0] < vals[1]
+    elif op == Ops.AND:
+        result = bool(vals[0]) and bool(vals[1])
+    elif op == Ops.IDIV:
+        # Python floor division; 0 when dividing by zero
+        result = vals[0] // vals[1] if vals[1] != 0 else 0
+    elif op == Ops.MOD:
+        # Python modulo; 0 for a zero divisor
+        result = vals[0] % vals[1] if vals[1] != 0 else 0
+    elif op == Ops.RECIP:
+        x = vals[0]
+        result = math.copysign(INF, x) if x == 0 else 1.0 / x
+    elif op == Ops.EXP2:
+        x = vals[0]
+        result = INF if x >= 128 else float(2 ** x)
+    elif op == Ops.LOG2:
+        x = vals[0]
+        if x == 0:
+            result = -INF
+        elif x < 0:
+            result = float("nan")
+        else:
+            result = math.log2(x)
+    elif op == Ops.SQRT:
+        x = vals[0]
+        result = float("nan") if x < 0 else math.sqrt(x)
+    elif op == Ops.CAST:
+        result = vals[0]
+    elif op == Ops.WHERE:
+        result = vals[1] if vals[0] else vals[2]
+    else:
+        return None
+    return UOp.const(dtype, result)
+
+
+def basic_rules():
+    return PatternMatcher([
+        # 1) constant fold unary ALU with a constant source
+        (UPat(ALU, src=(UPat.cvar('c'),), name='u'),
+         lambda u, c: exec_alu(u.op, u.dtype, [c.arg])),
+
+        # 2) constant fold binary ALU with two constant sources
+        (UPat(ALU, src=(UPat.cvar('a'), UPat.cvar('b')), name='u'),
+         lambda u, a, b: exec_alu(u.op, u.dtype, [a.arg, b.arg])),
+
+        # 3) WHERE with constant condition picks a branch
+        (UPat(Ops.WHERE, src=(UPat.cvar('c'), UPat.var('a'), UPat.var('b'))),
+         lambda c, a, b: a if c.arg else b),
+
+        # 4) WHERE with identical branches
+        (UPat(Ops.WHERE, src=(UPat.var('c'), UPat.var('x'), UPat.var('x'))),
+         lambda c, x: x),
+
+        # 5) commutative canonicalization: constant to the right
+        (UPat({Ops.ADD, Ops.MUL, Ops.MAX, Ops.AND},
+              src=(UPat.cvar('c'), UPat.var('x')), name='u'),
+         lambda u, c, x: None if x.op == Ops.CONST else UOp(u.op, u.dtype, (x, c), u.arg)),
+
+        # 6) x + 0 -> x
+        (UPat(Ops.ADD, src=(UPat.var('x'), UPat.cvar('c'))),
+         lambda x, c: x if c.arg == 0 else None),
+
+        # 7) x * 1 -> x  and  x * 0 -> 0
+        (UPat(Ops.MUL, src=(UPat.var('x'), UPat.cvar('c'))),
+         lambda x, c: x if c.arg == 1 else (UOp.const(x.dtype, 0) if c.arg == 0 else None)),
+
+        # 8) x // 1 -> x
+        (UPat(Ops.IDIV, src=(UPat.var('x'), UPat.cvar('c'))),
+         lambda x, c: x if c.arg == 1 else None),
+
+        # 9) x % 1 -> 0
+        (UPat(Ops.MOD, src=(UPat.var('x'), UPat.cvar('c'))),
+         lambda x, c: UOp.const(x.dtype, 0) if c.arg == 1 else None),
+
+        # 10) x & True -> x  and  x & False -> False
+        (UPat(Ops.AND, src=(UPat.var('x'), UPat.cvar('c'))),
+         lambda x, c: x if c.arg else UOp.const(x.dtype, False)),
+
+        # 11) max(x, x) -> x
+        (UPat(Ops.MAX, src=(UPat.var('x'), UPat.var('x'))),
+         lambda x: x),
+
+        # 12) (x + c1) + c2 -> x + (c1 + c2)
+        (UPat(Ops.ADD, src=(UPat(Ops.ADD, src=(UPat.var('x'), UPat.cvar('c1'))), UPat.cvar('c2'))),
+         lambda x, c1, c2: x + UOp.const(x.dtype, c1.arg + c2.arg)),
+
+        # 13) (x * c1) * c2 -> x * (c1 * c2)
+        (UPat(Ops.MUL, src=(UPat(Ops.MUL, src=(UPat.var('x'), UPat.cvar('c1'))), UPat.cvar('c2'))),
+         lambda x, c1, c2: x * UOp.const(x.dtype, c1.arg * c2.arg)),
+
+        # 14) (x + c) + y -> (x + y) + c  (y not constant)
+        (UPat(Ops.ADD, src=(UPat(Ops.ADD, src=(UPat.var('x'), UPat.cvar('c'))), UPat.var('y'))),
+         lambda x, c, y: None if y.op == Ops.CONST else (x + y) + c),
+
+        # 15) x + (y + c) -> (x + y) + c  (y not constant)
+        (UPat(Ops.ADD, src=(UPat.var('x'), UPat(Ops.ADD, src=(UPat.var('y'), UPat.cvar('c'))))),
+         lambda x, y, c: None if y.op == Ops.CONST else (x + y) + c),
+
+        # 16) int32 distribution: (a + b) * c -> a*c + b*c
+        (UPat(Ops.MUL, dtype=dtypes.int32,
+              src=(UPat(Ops.ADD, src=(UPat.var('a'), UPat.var('b'))), UPat.cvar('c'))),
+         lambda a, b, c: (a * c) + (b * c)),
+    ])
 
 # Step 6 - fold_div (not yet solved)
 # TODO: implement

@@ -14,7 +14,7 @@ python scaffold.py
 - [x] **2.** bounds
 - [x] **3.** UPat
 - [x] **4.** graph_rewrite
-- [ ] **5.** exec_alu
+- [x] **5.** exec_alu
 - [ ] **6.** fold_div
 - [ ] **7.** make_symbolic
 - [ ] **8.** render_sink
