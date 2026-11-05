@@ -608,8 +608,189 @@ symbolic = make_symbolic()
 def simplify(u):
     return graph_rewrite(u, symbolic)
 
-# Step 8 - render_sink (not yet solved)
-# TODO: implement
+# Step 8 - render_sink
+import math
+import numpy as np
+
+
+def _is_float(dt):
+    for name in ("float32", "float16", "float64", "bfloat16"):
+        f = getattr(dtypes, name, None)
+        if f is not None and dt == f:
+            return True
+    return False
+
+
+def _ctype(dt):
+    return "float" if _is_float(dt) else "int"
+
+
+def param(name, dtype, i):
+    return UOp(Ops.PARAM, dtype, (), (name, i))
+
+
+def load(p, idx):
+    return UOp(Ops.LOAD, p.dtype,
+               (UOp(Ops.INDEX, p.dtype, (p, UOp.const(dtypes.int32, idx))),))
+
+
+def store(p, idx, val):
+    return UOp(Ops.STORE, None,
+               (UOp(Ops.INDEX, p.dtype, (p, UOp.const(dtypes.int32, idx))), val))
+
+
+def sink(*stores):
+    return UOp(Ops.SINK, None, stores)
+
+
+def c_literal(dtype, v):
+    if _is_float(dtype):
+        fv = float(np.float32(v))
+        if math.isnan(fv):
+            return "NAN"
+        if math.isinf(fv):
+            return "(-INFINITY)" if fv < 0 else "INFINITY"
+        return f"{fv!r}f"
+    return str(int(v))
+
+
+class CRenderer:
+    def __init__(self):
+        self.lines, self.scopes, self.n = [], [{}], 0
+
+    def push(self):
+        self.scopes.append({})
+
+    def pop(self):
+        self.scopes.pop()
+
+    def lookup(self, u):
+        for scope in reversed(self.scopes):
+            if u in scope:
+                return scope[u]
+        return None
+
+    def emit(self, line):
+        self.lines.append("  " * len(self.scopes) + line)
+
+    def new_var(self, u, expr):
+        name = f"v{self.n}"
+        self.n += 1
+        self.emit(f"{_ctype(u.dtype)} {name} = {expr};")
+        self.scopes[-1][u] = name
+        return name
+
+    def expr(self, u):
+        if (name := self.lookup(u)) is not None:
+            return name
+        op = u.op
+        if op == Ops.CONST:
+            return c_literal(u.dtype, u.arg)
+        if op == Ops.RANGE:
+            return f"r{u.arg}"
+        if op == Ops.SPECIAL:
+            return u.arg[1]
+        if op == Ops.DEFINE_ACC:
+            return f"acc{u.arg}"
+        if op == Ops.LOAD:
+            index = u.src[0]
+            p, idx = index.src[0], index.src[1]
+            return self.new_var(u, f"data{p.arg[1]}[{self.expr(idx)}]")
+        if op == Ops.WHERE:
+            c, a, b = u.src
+            cc, aa, bb = self.expr(c), self.expr(a), self.expr(b)
+            return self.new_var(u, f"({cc} ? {aa} : {bb})")
+        if op == Ops.CAST:
+            x = self.expr(u.src[0])
+            return self.new_var(u, f"({_ctype(u.dtype)})({x})")
+        if op == Ops.RECIP:
+            x = self.expr(u.src[0])
+            return self.new_var(u, f"(1.0f/{x})")
+        if op == Ops.EXP2:
+            x = self.expr(u.src[0])
+            return self.new_var(u, f"exp2f({x})")
+        if op == Ops.LOG2:
+            x = self.expr(u.src[0])
+            return self.new_var(u, f"log2f({x})")
+        if op == Ops.SQRT:
+            x = self.expr(u.src[0])
+            return self.new_var(u, f"sqrtf({x})")
+        if op == Ops.MAX:
+            a, b = self.expr(u.src[0]), self.expr(u.src[1])
+            if _is_float(u.dtype):
+                return self.new_var(u, f"fmaxf({a}, {b})")
+            return self.new_var(u, f"({a} > {b} ? {a} : {b})")
+        if op in (Ops.IDIV, Ops.MOD):
+            a, b = self.expr(u.src[0]), self.expr(u.src[1])
+            vmin, _ = bounds(u.src[0])
+            if vmin >= 0:
+                sym = "/" if op == Ops.IDIV else "%"
+                return self.new_var(u, f"({a} {sym} {b})")
+            fn = "fdiv" if op == Ops.IDIV else "fmod_floor"
+            return self.new_var(u, f"{fn}({a}, {b})")
+        if op == Ops.ADD:
+            a, b = self.expr(u.src[0]), self.expr(u.src[1])
+            return self.new_var(u, f"({a} + {b})")
+        if op == Ops.MUL:
+            a, b = self.expr(u.src[0]), self.expr(u.src[1])
+            return self.new_var(u, f"({a} * {b})")
+        if op == Ops.CMPLT:
+            a, b = self.expr(u.src[0]), self.expr(u.src[1])
+            return self.new_var(u, f"({a} < {b})")
+        if op == Ops.AND:
+            a, b = self.expr(u.src[0]), self.expr(u.src[1])
+            return self.new_var(u, f"({a} && {b})")
+        raise NotImplementedError(f"expr: {op}")
+
+
+C_HEADER = """#include <math.h>
+static inline int fdiv(int a, int b) {
+  int q = a / b, r = a % b;
+  return (r != 0 && ((r < 0) != (b < 0))) ? q - 1 : q;
+}
+static inline int fmod_floor(int a, int b) {
+  int r = a % b;
+  return (r != 0 && ((r < 0) != (b < 0))) ? r + b : r;
+}
+"""
+
+
+def params_of(u):
+    seen = {}
+
+    def walk(x):
+        if x.op == Ops.PARAM:
+            seen[x.arg[1]] = x
+        for s in x.src:
+            walk(s)
+
+    walk(u)
+    return [seen[k] for k in sorted(seen)]
+
+
+def signature(name, ps, written):
+    args = []
+    for p in ps:
+        pos = p.arg[1]
+        const = "" if pos in written else "const "
+        args.append(f"{const}{_ctype(p.dtype)}* restrict data{pos}")
+    return f"void {name}({', '.join(args)})"
+
+
+def render_sink(s, name="kernel"):
+    ps = params_of(s)
+    written = {st.src[0].src[0].arg[1] for st in s.src}
+    sig = signature(name, ps, written)
+    r = CRenderer()
+    r.push()
+    for st in s.src:
+        index, val = st.src
+        p, idx = index.src
+        idx_s = r.expr(idx)
+        rhs = r.expr(val)
+        r.emit(f"data{p.arg[1]}[{idx_s}] = {rhs};")
+    r.pop()
+    return sig + " {\n" + "\n".join(r.lines) + "\n}\n"
 
 # Step 9 - eval_sink (not yet solved)
 # TODO: implement

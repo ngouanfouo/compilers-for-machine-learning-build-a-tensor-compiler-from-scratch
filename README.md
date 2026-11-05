@@ -17,7 +17,7 @@ python scaffold.py
 - [x] **5.** exec_alu
 - [x] **6.** fold_div
 - [x] **7.** make_symbolic
-- [ ] **8.** render_sink
+- [x] **8.** render_sink
 - [ ] **9.** eval_sink
 - [ ] **10.** compile_c
 - [ ] **11.** shape_of
