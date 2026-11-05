@@ -21,7 +21,7 @@ python scaffold.py
 - [x] **9.** eval_sink
 - [x] **10.** compile_c
 - [x] **11.** shape_of
-- [ ] **12.** Tensor
+- [x] **12.** Tensor
 - [ ] **13.** eval_tensor
 - [ ] **14.** conv2d
 - [ ] **15.** Kernel

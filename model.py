@@ -943,8 +943,320 @@ def shape_of(u):
         return shape_of(u.src[0])
     raise NotImplementedError(f"shape_of: {op}")
 
-# Step 12 - Tensor (not yet solved)
-# TODO: implement
+# Step 12 - Tensor
+import math
+
+
+class Tensor:
+    def __init__(self, uop):
+        self.uop = uop
+
+    @staticmethod
+    def input(name, shape, dtype=dtypes.float32):
+        return Tensor(buffer(name, shape, dtype))
+
+    @staticmethod
+    def const(v, dtype=dtypes.float32):
+        return Tensor(UOp.const(dtype, v))
+
+    @property
+    def shape(self):
+        return shape_of(self.uop)
+
+    @property
+    def dtype(self):
+        return self.uop.dtype
+
+    def __repr__(self):
+        return f"Tensor(shape={self.shape}, {self.dtype})"
+
+    # ---------------- movement ops ----------------
+    def reshape(self, *shape):
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = tuple(shape[0])
+        else:
+            shape = tuple(shape)
+        if -1 in shape:
+            idx = shape.index(-1)
+            known = 1
+            for i, s in enumerate(shape):
+                if i != idx:
+                    known *= s
+            total = 1
+            for s in self.shape:
+                total *= s
+            shape = shape[:idx] + (total // known,) + shape[idx + 1:]
+        prod = 1
+        for s in shape:
+            prod *= s
+        prod0 = 1
+        for s in self.shape:
+            prod0 *= s
+        assert prod == prod0, f"reshape {self.shape} -> {shape}"
+        if shape == self.shape:
+            return self
+        # consecutive reshapes collapse to the original source
+        if self.uop.op == Ops.RESHAPE:
+            src = self.uop.src[0]
+            if shape == shape_of(src):
+                return Tensor(src)
+        else:
+            src = self.uop
+        return Tensor(UOp(Ops.RESHAPE, self.dtype, (src,), shape))
+
+    def expand(self, *shape):
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = tuple(shape[0])
+        else:
+            shape = tuple(shape)
+        assert len(shape) == len(self.shape), f"expand {self.shape} -> {shape}"
+        for a, b in zip(self.shape, shape):
+            assert a == b or a == 1, f"expand {self.shape} -> {shape}"
+        if shape == self.shape:
+            return self
+        return Tensor(UOp(Ops.EXPAND, self.dtype, (self.uop,), shape))
+
+    def permute(self, *perm):
+        if len(perm) == 1 and isinstance(perm[0], (tuple, list)):
+            perm = tuple(perm[0])
+        else:
+            perm = tuple(perm)
+        ndim = len(self.shape)
+        perm = tuple(p % ndim for p in perm)
+        if perm == tuple(range(ndim)):
+            return self
+        return Tensor(UOp(Ops.PERMUTE, self.dtype, (self.uop,), perm))
+
+    def flip(self, *axes):
+        if len(axes) == 1 and isinstance(axes[0], (tuple, list)):
+            axes = tuple(axes[0])
+        else:
+            axes = tuple(axes)
+        ndim = len(self.shape)
+        axes = tuple(sorted({a % ndim for a in axes}))
+        if not axes:
+            return self
+        return Tensor(UOp(Ops.FLIP, self.dtype, (self.uop,), axes))
+
+    def pad(self, pads):
+        pads = tuple((int(lo), int(hi)) for lo, hi in pads)
+        if all(lo == 0 and hi == 0 for lo, hi in pads):
+            return self
+        return Tensor(UOp(Ops.PAD, self.dtype, (self.uop,), pads))
+
+    def shrink(self, ranges):
+        ranges = tuple((int(b), int(e)) for b, e in ranges)
+        for (b, e), s in zip(ranges, self.shape):
+            assert 0 <= b <= e <= s, f"shrink {ranges} on {self.shape}"
+        if all(b == 0 and e == s for (b, e), s in zip(ranges, self.shape)):
+            return self
+        return Tensor(UOp(Ops.SHRINK, self.dtype, (self.uop,), ranges))
+
+    def transpose(self, a=-2, b=-1):
+        ndim = len(self.shape)
+        a %= ndim
+        b %= ndim
+        perm = list(range(ndim))
+        perm[a], perm[b] = perm[b], perm[a]
+        return self.permute(*perm)
+
+    # ---------------- broadcasting ----------------
+    def _expand_to(self, target):
+        s = self.shape
+        if len(s) < len(target):
+            new = (1,) * (len(target) - len(s)) + s
+            t = self.reshape(new)
+        else:
+            t = self
+        if t.shape == target:
+            return t
+        return t.expand(target)
+
+    def _bcast(self, other):
+        if not isinstance(other, Tensor):
+            other = Tensor.const(other, self.dtype)
+        shapes = [self.shape, other.shape]
+        rank = max(len(s) for s in shapes)
+        padded = [(1,) * (rank - len(s)) + s for s in shapes]
+        out = tuple(max(c) for c in zip(*padded))
+        return self._expand_to(out), other._expand_to(out)
+
+    def _alu(self, op, *others):
+        # number-wrap dtype
+        if op == Ops.WHERE:
+            wrap_dtype = dtypes.float32
+            for t in others:
+                if isinstance(t, Tensor):
+                    wrap_dtype = t.dtype
+                    break
+        else:
+            wrap_dtype = self.dtype
+        tensors = []
+        for o in (self,) + others:
+            if isinstance(o, Tensor):
+                tensors.append(o)
+            else:
+                tensors.append(Tensor.const(o, wrap_dtype))
+        rank = max(len(t.shape) for t in tensors)
+        padded = [(1,) * (rank - len(t.shape)) + t.shape for t in tensors]
+        out = tuple(max(c) for c in zip(*padded))
+        srcs = tuple(t._expand_to(out).uop for t in tensors)
+        if op in (Ops.CMPLT, Ops.AND):
+            dt = dtypes.bool
+        elif op == Ops.WHERE:
+            dt = tensors[1].dtype
+        else:
+            dt = self.dtype
+        return Tensor(UOp(op, dt, srcs))
+
+    # ---------------- arithmetic / elementwise ----------------
+    def __add__(self, other):
+        return self._alu(Ops.ADD, other)
+
+    def __radd__(self, other):
+        return self._alu(Ops.ADD, other)
+
+    def __mul__(self, other):
+        return self._alu(Ops.MUL, other)
+
+    def __rmul__(self, other):
+        return self._alu(Ops.MUL, other)
+
+    def __neg__(self):
+        return self._alu(Ops.MUL, -1)
+
+    def __sub__(self, other):
+        return self._alu(Ops.ADD, -other)
+
+    def __rsub__(self, other):
+        return (-self) + other
+
+    def __floordiv__(self, other):
+        return self._alu(Ops.IDIV, other)
+
+    def __mod__(self, other):
+        return self._alu(Ops.MOD, other)
+
+    def __truediv__(self, other):
+        if not isinstance(other, Tensor):
+            other = Tensor.const(other, self.dtype)
+        return self * other.recip()
+
+    def __rtruediv__(self, other):
+        if not isinstance(other, Tensor):
+            other = Tensor.const(other, self.dtype)
+        return other * self.recip()
+
+    def __lt__(self, other):
+        return self._alu(Ops.CMPLT, other)
+
+    def __gt__(self, other):
+        if isinstance(other, Tensor):
+            return other._alu(Ops.CMPLT, self)
+        return Tensor.const(other, self.dtype)._alu(Ops.CMPLT, self)
+
+    def __and__(self, other):
+        return self._alu(Ops.AND, other)
+
+    def maximum(self, other):
+        return self._alu(Ops.MAX, other)
+
+    def where(self, a, b):
+        return self._alu(Ops.WHERE, a, b)
+
+    def recip(self):
+        return Tensor(UOp(Ops.RECIP, self.dtype, (self.uop,)))
+
+    def exp2(self):
+        return Tensor(UOp(Ops.EXP2, self.dtype, (self.uop,)))
+
+    def log2(self):
+        return Tensor(UOp(Ops.LOG2, self.dtype, (self.uop,)))
+
+    def sqrt(self):
+        return Tensor(UOp(Ops.SQRT, self.dtype, (self.uop,)))
+
+    def exp(self):
+        return (self * math.log2(math.e)).exp2()
+
+    def log(self):
+        return self.log2() * math.log(2)
+
+    def relu(self):
+        return self.maximum(0)
+
+    def square(self):
+        return self * self
+
+    def cast(self, dtype):
+        return Tensor(UOp(Ops.CAST, dtype, (self.uop,)))
+
+    # ---------------- reductions ----------------
+    def _reduce(self, op, axis, keepdim):
+        ndim = len(self.shape)
+        if axis is None:
+            axes = tuple(range(ndim))
+        else:
+            if isinstance(axis, int):
+                axis = (axis,)
+            axes = tuple(sorted({a % ndim for a in axis}))
+        reduced_shape = tuple(1 if i in axes else s for i, s in enumerate(self.shape))
+        r = Tensor(UOp(Ops.REDUCE_AXIS, self.dtype, (self.uop,), (op, axes)))
+        if keepdim:
+            return r
+        newshape = tuple(s for i, s in enumerate(self.shape) if i not in axes)
+        if newshape == reduced_shape:
+            return r
+        return r.reshape(newshape)
+
+    def sum(self, axis=None, keepdim=False):
+        return self._reduce(Ops.ADD, axis, keepdim)
+
+    def max(self, axis=None, keepdim=False):
+        return self._reduce(Ops.MAX, axis, keepdim)
+
+    def mean(self, axis=None, keepdim=False):
+        s = self.sum(axis, keepdim)
+        ndim = len(self.shape)
+        if axis is None:
+            axes = tuple(range(ndim))
+        else:
+            if isinstance(axis, int):
+                axis = (axis,)
+            axes = tuple({a % ndim for a in axis})
+        count = 1
+        for a in axes:
+            count *= self.shape[a]
+        return s * (1.0 / count)
+
+    # ---------------- composites ----------------
+    def matmul(self, w):
+        M, K = self.shape[-2], self.shape[-1]
+        N = w.shape[-1]
+        a = self.reshape(self.shape[:-2] + (M, 1, K))
+        wt = w.transpose()  # (..., N, K)
+        b = wt.reshape(wt.shape[:-2] + (1, N, K))
+        return (a * b).sum(-1)
+
+    def __matmul__(self, w):
+        return self.matmul(w)
+
+    def softmax(self, axis=-1):
+        m = self.max(axis, keepdim=True)
+        e = (self - m).exp()
+        s = e.sum(axis, keepdim=True)
+        return e / s
+
+    def logsoftmax(self, axis=-1):
+        m = self.max(axis, keepdim=True)
+        z = self - m
+        return z - z.exp().sum(axis, keepdim=True).log()
+
+    def layernorm(self, eps=1e-5):
+        mu = self.mean(-1, keepdim=True)
+        d = self - mu
+        var = (d * d).mean(-1, keepdim=True)
+        return d / (var + eps).sqrt()
 
 # Step 13 - eval_tensor (not yet solved)
 # TODO: implement
