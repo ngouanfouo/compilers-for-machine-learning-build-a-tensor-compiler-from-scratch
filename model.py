@@ -260,8 +260,73 @@ def bounds(u):
 
     return (-INF, INF)
 
-# Step 3 - UPat (not yet solved)
-# TODO: implement
+# Step 3 - UPat
+_UNSET = object()
+
+
+class UPat:
+    def __init__(self, op=None, dtype=None, src=None, arg=_UNSET, name=None):
+        self.op = op
+        self.dtype = dtype
+        self.src = src
+        self.arg = arg
+        self.name = name
+
+    @staticmethod
+    def var(name=None, dtype=None):
+        return UPat(dtype=dtype, name=name)
+
+    @staticmethod
+    def cvar(name=None, dtype=None):
+        return UPat(Ops.CONST, dtype=dtype, name=name)
+
+    def match(self, u, store):
+        if self.op is not None:
+            if isinstance(self.op, (set, frozenset)):
+                if u.op not in self.op:
+                    return False
+            elif u.op != self.op:
+                return False
+
+        if self.dtype is not None and u.dtype != self.dtype:
+            return False
+
+        if self.arg is not _UNSET and u.arg != self.arg:
+            return False
+
+        if self.src is not None:
+            u_src = u.src if u.src is not None else ()
+            if len(self.src) != len(u_src):
+                return False
+            for p, s in zip(self.src, u_src):
+                if not p.match(s, store):
+                    return False
+
+        if self.name is not None:
+            if self.name in store:
+                if store[self.name] is not u:
+                    return False
+            else:
+                store[self.name] = u
+
+        return True
+
+
+class PatternMatcher:
+    def __init__(self, patterns):
+        self.patterns = list(patterns)
+
+    def __add__(self, other):
+        return PatternMatcher(self.patterns + list(other.patterns))
+
+    def rewrite(self, u):
+        for pat, fn in self.patterns:
+            store = {}
+            if pat.match(u, store):
+                result = fn(**store)
+                if result is not None and result is not u:
+                    return result
+        return None
 
 # Step 4 - graph_rewrite (not yet solved)
 # TODO: implement
