@@ -1562,8 +1562,91 @@ def lower_kernel(root, inputs, name="k"):
     k.params = params
     return k.map_exprs(simplify)
 
-# Step 17 - ReduceLowerer (not yet solved)
-# TODO: implement
+# Step 17 - ReduceLowerer
+def reduce_exprs(r):
+    exprs = []
+    for acc, init, update in r.accs:
+        exprs.append(init)
+        exprs.append(update)
+    for b in r.body:
+        exprs.extend(reduce_exprs(b))
+    return exprs
+
+
+class ReduceLowerer(Lowerer):
+    def index(self, u, idxs, root):
+        # A realized reduce that isn't the root becomes a plain buffer load
+        # (handled by the parent); everything else defers too.
+        if u.op is not Ops.REDUCE_AXIS or (u is not root and u in self.realized):
+            return super().index(u, idxs, root)
+
+        key = (u, idxs)
+        if key in self.memo:
+            return self.memo[key]
+
+        op, axes = u.arg
+        src = u.src[0]
+        sshape = shape_of(src)
+
+        # One fresh range per reduced axis, sized by the source.
+        new_ranges = tuple(self.new_range(sshape[k]) for k in axes)
+        axis_map = dict(zip(axes, new_ranges))
+        src_idxs = tuple(axis_map.get(k, idxs[k]) for k in range(len(sshape)))
+
+        # Push [enclosing ranges | new ranges, []] and lower the source inside it.
+        enclosing = self.frames[-1][0] if self.frames else set()
+        self.frames.append([enclosing | set(new_ranges), []])
+        val = self.index(src, src_idxs, root)
+        body = self.frames.pop()[1]
+
+        # Accumulator + coupled init/update.
+        dtype = u.dtype
+        acc = self.new_acc(dtype)
+        if op == Ops.ADD:
+            init = UOp.const(dtype, 0.0)
+            update = acc + val
+        elif op == Ops.MAX:
+            init = UOp.const(dtype, -INF)
+            update = acc.maximum(val)
+        else:
+            raise NotImplementedError(f"reduce op {op}")
+
+        stmt = Reduce(new_ranges, [[acc, init, update]], body)
+
+        # Dependencies: ranges in init, update and all body expressions
+        # (recursively through nested reduces), minus this reduce's own ranges.
+        deps = set()
+        for e in reduce_exprs(stmt):
+            deps |= ranges_in(e)
+        deps -= set(new_ranges)
+
+        # Hoist to the outermost frame whose set covers all deps; else innermost.
+        target = None
+        for frame in self.frames:
+            if deps <= frame[0]:
+                target = frame
+                break
+        if target is None:
+            target = self.frames[-1]
+        target[1].append(stmt)
+
+        self.memo[key] = acc
+        return acc
+
+
+def lower_kernel(root, inputs, name="k"):
+    realized = {}
+    params = [param("out", root.dtype, 0)]
+    for i, (t, nm) in enumerate(inputs.items()):
+        p = param(nm, t.dtype, i + 1)
+        realized[t] = p
+        params.append(p)
+
+    low = ReduceLowerer(realized)
+    k = low.lower(root)
+    k.name = name
+    k.params = params
+    return k.map_exprs(simplify)
 
 # Step 18 - run_kernel_np (not yet solved)
 # TODO: implement
