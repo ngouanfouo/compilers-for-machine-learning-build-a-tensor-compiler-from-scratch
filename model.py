@@ -827,8 +827,73 @@ def eval_sink(s, bufs):
         bufs[p.arg[0]].reshape(-1)[i] = ev(val)
     return bufs
 
-# Step 10 - compile_c (not yet solved)
-# TODO: implement
+# Step 10 - compile_c
+import os
+import shutil
+import subprocess
+import tempfile
+import hashlib
+import ctypes
+import numpy as np
+
+_CC = None
+_LIBS = {}
+
+
+def compiler():
+    global _CC
+    if _CC is not None:
+        return _CC
+    cc = os.environ.get("CC")
+    if cc:
+        _CC = cc
+    else:
+        for cand in ("clang", "gcc", "cc"):
+            path = shutil.which(cand)
+            if path is not None:
+                _CC = path
+                break
+    if _CC is None:
+        raise RuntimeError("no C compiler found (set CC or install clang/gcc/cc)")
+    return _CC
+
+
+def compile_c(src):
+    full = C_HEADER + src
+    key = hashlib.sha1(full.encode()).hexdigest()
+    if key in _LIBS:
+        return _LIBS[key]
+
+    tmpdir = tempfile.mkdtemp(prefix="kern")
+    c_path = os.path.join(tmpdir, "kernel.c")
+    so_path = os.path.join(tmpdir, "kernel.so")
+    with open(c_path, "w") as f:
+        f.write(full)
+
+    cmd = [compiler(), "-O3", "-march=native", "-shared", "-fPIC", "-w",
+           c_path, "-o", so_path, "-lm"]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.decode())
+
+    lib = ctypes.CDLL(so_path)
+    _LIBS[key] = lib
+    return lib
+
+
+def call_kernel(lib, name, bufs):
+    fn = getattr(lib, name)
+    args = [ctypes.c_void_p(arr.ctypes.data) for arr in bufs]
+    fn(*args)
+
+
+def run_sink(s, bufs, name="kernel"):
+    ps = params_of(s)                        # sorted by pointer position
+    arrays = [bufs[p.arg[0]] for p in ps]    # in parameter order
+    src = render_sink(s, name)
+    lib = compile_c(src)
+    call_kernel(lib, name, arrays)
+    return bufs
 
 # Step 11 - shape_of (not yet solved)
 # TODO: implement
