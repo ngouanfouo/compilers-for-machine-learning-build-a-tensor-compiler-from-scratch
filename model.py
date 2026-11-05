@@ -1648,8 +1648,119 @@ def lower_kernel(root, inputs, name="k"):
     k.params = params
     return k.map_exprs(simplify)
 
-# Step 18 - run_kernel_np (not yet solved)
-# TODO: implement
+# Step 18 - run_kernel_np
+import numpy as np
+
+
+def _np_dt(dt):
+    return getattr(dt, "np", dt)
+
+
+def run_kernel_np(k, bufs):
+    out = bufs[0]
+    contiguous = out.flags["C_CONTIGUOUS"]
+    out_flat = out.reshape(-1)
+
+    # Output grid sizes: a CONST in out_ranges is a size-1 axis (index 0).
+    out_sizes = [1 if r.op == Ops.CONST else int(r.src[0].arg) for r in k.out_ranges]
+    grid_shape = tuple(out_sizes)
+
+    env = {}
+    if grid_shape:
+        idx_arrs = np.indices(grid_shape, dtype=np.int64)
+        for i, r in enumerate(k.out_ranges):
+            if r.op != Ops.CONST:          # RANGE / SPECIAL bound to coordinates
+                env[r] = idx_arrs[i]
+            # CONST stays unevaluated-here; ev() returns its scalar 0.
+
+    cache = {}
+
+    def coerce(dt, r):
+        kind = np.dtype(_np_dt(dt)).kind
+        if kind == "f":
+            return np.asarray(r, dtype=np.float32)
+        if kind == "i":
+            return np.asarray(r, dtype=np.int64)
+        if kind == "b":
+            return np.asarray(r, dtype=bool)
+        return np.asarray(r)
+
+    def ev(u):
+        if u in cache:
+            return cache[u]
+        if u in env:
+            r = env[u]
+        else:
+            op = u.op
+            if op == Ops.CONST:
+                r = coerce(u.dtype, u.arg)
+            elif op == Ops.LOAD:
+                index = u.src[0]
+                p = index.src[0]
+                idx = np.asarray(ev(index.src[1]), dtype=np.int64)
+                flat = np.asarray(bufs[p.arg[1]]).reshape(-1)
+                if flat.size:
+                    r = flat[np.clip(idx, 0, flat.size - 1)]
+                else:
+                    r = np.zeros_like(idx)
+                r = coerce(u.dtype, r)
+            elif op == Ops.WHERE:
+                c = ev(u.src[0]); a = ev(u.src[1]); b = ev(u.src[2])
+                r = coerce(u.dtype, np.where(np.asarray(c, dtype=bool), a, b))
+            elif op == Ops.CAST:
+                r = coerce(u.dtype, ev(u.src[0]))
+            elif op in ALU:
+                s = [ev(x) for x in u.src]
+                with np.errstate(all="ignore"):
+                    if op == Ops.ADD:      r = s[0] + s[1]
+                    elif op == Ops.MUL:    r = s[0] * s[1]
+                    elif op == Ops.MAX:    r = np.maximum(s[0], s[1])
+                    elif op == Ops.CMPLT:  r = np.asarray(s[0]) < np.asarray(s[1])
+                    elif op == Ops.AND:    r = np.logical_and(s[0], s[1])
+                    elif op == Ops.IDIV:
+                        a = np.asarray(s[0], np.int64); b = np.asarray(s[1], np.int64)
+                        r = np.where(b != 0, np.floor_divide(a, np.where(b != 0, b, 1)), 0)
+                    elif op == Ops.MOD:
+                        a = np.asarray(s[0], np.int64); b = np.asarray(s[1], np.int64)
+                        r = np.where(b != 0, np.mod(a, np.where(b != 0, b, 1)), 0)
+                    elif op == Ops.RECIP: r = 1.0 / np.asarray(s[0], np.float64)
+                    elif op == Ops.EXP2:  r = np.exp2(np.asarray(s[0], np.float64))
+                    elif op == Ops.LOG2:  r = np.log2(np.asarray(s[0], np.float64))
+                    elif op == Ops.SQRT:  r = np.sqrt(np.asarray(s[0], np.float64))
+                    else: raise NotImplementedError(op)
+                r = coerce(u.dtype, r)
+            else:
+                raise NotImplementedError(f"ev: {op}")
+        cache[u] = r
+        return r
+
+    def run_reduce(red):
+        for acc, init, _ in red.accs:
+            env[acc] = np.array(np.broadcast_to(ev(init), grid_shape))
+        sizes = tuple(int(r.src[0].arg) for r in red.ranges)
+        for coord in np.ndindex(*sizes):
+            for r, c in zip(red.ranges, coord):
+                env[r] = np.int64(c)
+            cache.clear()
+            for b in red.body:
+                run_reduce(b)
+            updates = [(acc, ev(update)) for acc, _, update in red.accs]
+            for acc, val in updates:
+                env[acc][...] = val
+        for r in red.ranges:
+            del env[r]
+        cache.clear()
+
+    for stmt in k.body:
+        run_reduce(stmt)
+
+    for idx_node, val_node in k.stores:
+        fi = np.asarray(ev(idx_node), dtype=np.int64)
+        out_flat[fi] = ev(val_node)
+
+    if not contiguous:
+        out[...] = out_flat.reshape(out.shape)
+    return out
 
 # Step 19 - render_kernel (not yet solved)
 # TODO: implement
