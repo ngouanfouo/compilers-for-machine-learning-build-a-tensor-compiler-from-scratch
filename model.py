@@ -1372,8 +1372,75 @@ def conv2d(x, w, pad=0):
 
 Tensor.conv2d = conv2d
 
-# Step 15 - Kernel (not yet solved)
-# TODO: implement
+# Step 15 - Kernel
+def load(p, idx):
+    if not isinstance(idx, UOp):
+        idx = UOp.const(dtypes.int32, idx)
+    return UOp(Ops.LOAD, p.dtype, (UOp(Ops.INDEX, p.dtype, (p, idx)),))
+
+
+class Reduce:
+    def __init__(self, ranges, accs, body):
+        self.ranges, self.accs, self.body = tuple(ranges), [list(a) for a in accs], list(body)
+
+    def __repr__(self):
+        return f"Reduce(ranges={[r.arg for r in self.ranges]}, accs={len(self.accs)}, body={self.body})"
+
+
+class Kernel:
+    def __init__(self, name, params, out_ranges, body, stores):
+        self.name, self.params, self.out_ranges, self.body, self.stores = name, list(params), list(out_ranges), list(body), list(stores)
+
+    def map_exprs(self, f):
+        def map_reduce(red):
+            new_accs = [[acc, f(init), f(update)] for acc, init, update in red.accs]
+            new_body = [map_reduce(b) for b in red.body]
+            return Reduce(red.ranges, new_accs, new_body)
+
+        new_body = [map_reduce(b) for b in self.body]
+        new_stores = [(f(idx), f(val)) for idx, val in self.stores]
+        return Kernel(self.name, self.params, self.out_ranges, new_body, new_stores)
+
+    def all_exprs(self):
+        exprs = []
+
+        def collect(red):
+            for acc, init, update in red.accs:
+                exprs.append(init)
+                exprs.append(update)
+            for b in red.body:
+                collect(b)
+
+        for b in self.body:
+            collect(b)
+        for idx, val in self.stores:
+            exprs.append(idx)
+            exprs.append(val)
+        return exprs
+
+
+def ranges_in(u):
+    seen, result = set(), set()
+    stack = [u]
+    while stack:
+        x = stack.pop()
+        if x in seen:
+            continue
+        seen.add(x)
+        if x.op == Ops.RANGE:
+            result.add(x)
+        stack.extend(x.src)
+    return result
+
+
+def flat_index(idxs, shape):
+    strides = strides_of(shape)
+    result = UOp.const(dtypes.int32, 0)
+    for idx, s, stride in zip(idxs, shape, strides):
+        if s == 1:
+            continue
+        result = result + idx * UOp.const(dtypes.int32, stride)
+    return result
 
 # Step 16 - Lowerer (not yet solved)
 # TODO: implement
