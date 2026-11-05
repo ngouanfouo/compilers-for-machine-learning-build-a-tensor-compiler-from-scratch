@@ -473,8 +473,113 @@ def basic_rules():
          lambda a, b, c: (a * c) + (b * c)),
     ])
 
-# Step 6 - fold_div (not yet solved)
-# TODO: implement
+# Step 6 - fold_div
+def _terms(u):
+    if u.op == Ops.ADD:
+        return _terms(u.src[0]) + _terms(u.src[1])
+    return [u]
+
+
+def _factor(t):
+    if t.op == Ops.CONST:
+        return (None, t.arg)
+    if t.op == Ops.MUL:
+        if t.src[1].op == Ops.CONST:
+            return (t.src[0], t.src[1].arg)
+        if t.src[0].op == Ops.CONST:
+            return (t.src[1], t.src[0].arg)
+    return (t, 1)
+
+
+def _sum(terms, dtype):
+    if not terms:
+        return UOp.const(dtype, 0)
+    result = terms[0]
+    for t in terms[1:]:
+        result = result + t
+    return result
+
+
+def fold_div(x, c):
+    if c.op != Ops.CONST or c.arg <= 0:
+        return None
+    dtype = x.dtype
+    cval = c.arg
+    terms = _terms(x)
+
+    quotients = []
+    R = []
+    for t in terms:
+        base, k = _factor(t)
+        if k % cval == 0:
+            q = k // cval
+            if base is None:
+                quotients.append(UOp.const(dtype, q))
+            elif q == 1:
+                quotients.append(base)
+            else:
+                quotients.append(base * UOp.const(dtype, q))
+        else:
+            R.append(t)
+
+    # No divisible terms, single term y * k with k > 1 and c % k == 0
+    if not quotients and len(terms) == 1:
+        base, k = _factor(terms[0])
+        if base is not None and k > 1 and cval % k == 0:
+            return base // UOp.const(dtype, cval // k)
+
+    R_uop = _sum(R, dtype)
+    vmin, vmax = bounds(R_uop)
+    if vmin >= 0 and vmax < cval:
+        return _sum(quotients, dtype)
+    if quotients:
+        return _sum(quotients, dtype) + (R_uop // c)
+    return None
+
+
+def fold_mod(x, c):
+    if c.op != Ops.CONST or c.arg <= 0:
+        return None
+    dtype = x.dtype
+    cval = c.arg
+    terms = _terms(x)
+
+    R = []
+    dropped = False
+    for t in terms:
+        _, k = _factor(t)
+        if k % cval == 0:
+            dropped = True
+        else:
+            R.append(t)
+
+    R_uop = _sum(R, dtype)
+    vmin, vmax = bounds(R_uop)
+    if vmin >= 0 and vmax < cval:
+        return R_uop
+    if dropped:
+        return R_uop % c
+    return None
+
+
+def fold_cmplt(x, y):
+    vmin_x, vmax_x = bounds(x)
+    vmin_y, vmax_y = bounds(y)
+    if vmax_x < vmin_y:
+        return UOp.const(dtypes.bool, True)
+    if vmin_x >= vmax_y:
+        return UOp.const(dtypes.bool, False)
+    return None
+
+
+def fold_max(x, y):
+    vmin_x, vmax_x = bounds(x)
+    vmin_y, vmax_y = bounds(y)
+    if vmin_x >= vmax_y:
+        return x
+    if vmin_y >= vmax_x:
+        return y
+    return None
 
 # Step 7 - make_symbolic (not yet solved)
 # TODO: implement
