@@ -1258,8 +1258,86 @@ class Tensor:
         var = (d * d).mean(-1, keepdim=True)
         return d / (var + eps).sqrt()
 
-# Step 13 - eval_tensor (not yet solved)
-# TODO: implement
+# Step 13 - eval_tensor
+import numpy as np
+
+
+def _npdtype(dt):
+    return getattr(dt, "np", dt)
+
+
+def _alu_np(op, s):
+    if op == Ops.ADD:
+        return s[0] + s[1]
+    if op == Ops.MUL:
+        return s[0] * s[1]
+    if op == Ops.MAX:
+        return np.maximum(s[0], s[1])
+    if op == Ops.CMPLT:
+        return s[0] < s[1]
+    if op == Ops.AND:
+        return np.logical_and(s[0], s[1])
+    if op == Ops.IDIV:
+        return np.floor_divide(s[0], s[1])
+    if op == Ops.MOD:
+        return np.mod(s[0], s[1])
+    if op == Ops.RECIP:
+        return np.reciprocal(s[0])
+    if op == Ops.EXP2:
+        return np.exp2(s[0])
+    if op == Ops.LOG2:
+        return np.log2(s[0])
+    if op == Ops.SQRT:
+        return np.sqrt(s[0])
+    if op == Ops.CAST:
+        return s[0]
+    if op == Ops.WHERE:
+        return np.where(s[0], s[1], s[2])
+    raise NotImplementedError(f"alu: {op}")
+
+
+def eval_tensor(u, bufs, cache=None):
+    if cache is None:
+        cache = {}
+    if u in cache:
+        return cache[u]
+
+    op = u.op
+    if op == Ops.BUFFER:
+        name, shape = u.arg
+        arr = np.asarray(bufs[name]).astype(_npdtype(u.dtype)).reshape(shape)
+    elif op == Ops.CONST:
+        arr = np.array(u.arg, dtype=_npdtype(u.dtype))
+    elif op == Ops.RESHAPE:
+        arr = eval_tensor(u.src[0], bufs, cache).reshape(tuple(u.arg))
+    elif op == Ops.EXPAND:
+        arr = np.broadcast_to(eval_tensor(u.src[0], bufs, cache), tuple(u.arg))
+    elif op == Ops.PERMUTE:
+        arr = np.transpose(eval_tensor(u.src[0], bufs, cache), u.arg)
+    elif op == Ops.FLIP:
+        arr = eval_tensor(u.src[0], bufs, cache)
+        for a in u.arg:
+            arr = np.flip(arr, a)
+    elif op == Ops.PAD:
+        arr = np.pad(eval_tensor(u.src[0], bufs, cache), u.arg)
+    elif op == Ops.SHRINK:
+        src = eval_tensor(u.src[0], bufs, cache)
+        arr = src[tuple(slice(b, e) for b, e in u.arg)]
+    elif op == Ops.REDUCE_AXIS:
+        rop, axes = u.arg
+        src = eval_tensor(u.src[0], bufs, cache)
+        fn = np.sum if rop == Ops.ADD else np.max
+        arr = fn(src, axis=axes, keepdims=True)
+    elif op in ALU:
+        with np.errstate(all="ignore"):
+            vals = [eval_tensor(s, bufs, cache) for s in u.src]
+            arr = _alu_np(op, vals)
+    else:
+        raise NotImplementedError(f"eval_tensor: {op}")
+
+    arr = np.asarray(arr).astype(_npdtype(u.dtype))
+    cache[u] = arr
+    return arr
 
 # Step 14 - conv2d (not yet solved)
 # TODO: implement
