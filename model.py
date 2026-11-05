@@ -792,8 +792,40 @@ def render_sink(s, name="kernel"):
     r.pop()
     return sig + " {\n" + "\n".join(r.lines) + "\n}\n"
 
-# Step 9 - eval_sink (not yet solved)
-# TODO: implement
+# Step 9 - eval_sink
+import numpy as np
+
+
+def eval_sink(s, bufs):
+    memo = {}
+
+    def ev(u):
+        if u in memo:
+            return memo[u]
+        op = u.op
+        if op == Ops.CONST:
+            r = u.arg
+        elif op == Ops.INDEX:
+            r = int(ev(u.src[1]))
+        elif op == Ops.LOAD:
+            index = u.src[0]              # INDEX
+            p = index.src[0]              # PARAM
+            i = int(ev(index.src[1]))
+            r = bufs[p.arg[0]].reshape(-1)[i].item()
+        elif op in ALU:
+            vals = [ev(x) for x in u.src]
+            r = exec_alu(op, u.dtype, vals).arg
+        else:
+            raise NotImplementedError(f"eval_sink: {op}")
+        memo[u] = r
+        return r
+
+    for st in s.src:                       # STORE nodes, in order
+        index, val = st.src                # INDEX, value
+        p = index.src[0]                   # PARAM
+        i = int(ev(index.src[1]))
+        bufs[p.arg[0]].reshape(-1)[i] = ev(val)
+    return bufs
 
 # Step 10 - compile_c (not yet solved)
 # TODO: implement
