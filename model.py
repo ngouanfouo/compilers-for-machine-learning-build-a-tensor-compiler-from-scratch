@@ -1442,8 +1442,125 @@ def flat_index(idxs, shape):
         result = result + idx * UOp.const(dtypes.int32, stride)
     return result
 
-# Step 16 - Lowerer (not yet solved)
-# TODO: implement
+# Step 16 - Lowerer
+class Lowerer:
+    def __init__(self, realized):
+        self.realized, self.n = realized, 0
+        self.memo, self.frames = {}, []
+
+    def new_range(self, n):
+        r = UOp.range(n, self.n)
+        self.n += 1
+        return r
+
+    def new_acc(self, dtype):
+        a = UOp(Ops.DEFINE_ACC, dtype, (), self.n)
+        self.n += 1
+        return a
+
+    def lower(self, root):
+        shape = shape_of(root)
+        out_ranges = []
+        for s in shape:
+            out_ranges.append(UOp.const(dtypes.int32, 0) if s == 1 else self.new_range(s))
+        idxs = tuple(out_ranges)
+        out_set = {r for r in out_ranges if r.op == Ops.RANGE}
+        self.frames.append([out_set, []])
+        val = self.index(root, idxs, root)
+        body = self.frames.pop()[1]
+        return Kernel("k", [], out_ranges, body, [(flat_index(idxs, shape), val)])
+
+    def index(self, u, idxs, root):
+        key = (u, idxs)
+        if key in self.memo:
+            return self.memo[key]
+        op = u.op
+        if op == Ops.BUFFER or (u in self.realized and u is not root):
+            res = load(self.realized[u], flat_index(idxs, shape_of(u)))
+        elif op == Ops.CONST:
+            res = u
+        elif op in ALU:
+            res = UOp(op, u.dtype, tuple(self.index(s, idxs, root) for s in u.src), u.arg)
+        elif op == Ops.RESHAPE:
+            src = u.src[0]
+            f = flat_index(idxs, shape_of(u))
+            if src.op == Ops.BUFFER or (src in self.realized and src is not root):
+                # contiguous source: read the same flat offset
+                res = load(self.realized[src], f)
+            else:
+                sshape = shape_of(src)
+                sstrides = strides_of(sshape)
+                src_idxs = tuple(
+                    UOp.const(dtypes.int32, 0) if sj == 1
+                    else (f // UOp.const(dtypes.int32, st)) % UOp.const(dtypes.int32, sj)
+                    for sj, st in zip(sshape, sstrides)
+                )
+                res = self.index(src, src_idxs, root)
+        elif op == Ops.EXPAND:
+            src = u.src[0]
+            sshape = shape_of(src)
+            src_idxs = tuple(
+                UOp.const(dtypes.int32, 0) if sj == 1 else idxs[i]
+                for i, sj in enumerate(sshape)
+            )
+            res = self.index(src, src_idxs, root)
+        elif op == Ops.PERMUTE:
+            src = u.src[0]
+            src_idxs = [None] * len(u.arg)
+            for k, p in enumerate(u.arg):
+                src_idxs[p] = idxs[k]
+            res = self.index(src, tuple(src_idxs), root)
+        elif op == Ops.FLIP:
+            src = u.src[0]
+            shape = shape_of(u)
+            axes = set(u.arg)
+            src_idxs = tuple(
+                (UOp.const(dtypes.int32, shape[k] - 1) - idxs[k]) if k in axes else idxs[k]
+                for k in range(len(shape))
+            )
+            res = self.index(src, src_idxs, root)
+        elif op == Ops.SHRINK:
+            src = u.src[0]
+            src_idxs = tuple(
+                idxs[k] if b == 0 else idxs[k] + UOp.const(dtypes.int32, b)
+                for k, (b, e) in enumerate(u.arg)
+            )
+            res = self.index(src, src_idxs, root)
+        elif op == Ops.PAD:
+            src = u.src[0]
+            sshape = shape_of(src)
+            src_idxs = []
+            valid = UOp.const(dtypes.bool, True)
+            for k, (lo, hi) in enumerate(u.arg):
+                src_idxs.append(idxs[k] if lo == 0 else idxs[k] - UOp.const(dtypes.int32, lo))
+                if lo > 0:
+                    valid = UOp(Ops.AND, dtypes.bool,
+                                (valid, UOp.const(dtypes.int32, lo - 1) < idxs[k]))
+                if hi > 0:
+                    valid = UOp(Ops.AND, dtypes.bool,
+                                (valid, idxs[k] < UOp.const(dtypes.int32, lo + sshape[k])))
+            inner = self.index(src, tuple(src_idxs), root)
+            res = UOp(Ops.WHERE, u.dtype, (valid, inner, UOp.const(u.dtype, 0)))
+        elif op == Ops.REDUCE_AXIS:
+            raise NotImplementedError("REDUCE_AXIS")
+        else:
+            raise NotImplementedError(f"index: {op}")
+        self.memo[key] = res
+        return res
+
+
+def lower_kernel(root, inputs, name="k"):
+    realized = {}
+    params = [param("out", root.dtype, 0)]
+    for i, (t, nm) in enumerate(inputs.items()):
+        p = param(nm, t.dtype, i + 1)
+        realized[t] = p
+        params.append(p)
+    low = Lowerer(realized)
+    k = low.lower(root)
+    k.name = name
+    k.params = params
+    return k.map_exprs(simplify)
 
 # Step 17 - ReduceLowerer (not yet solved)
 # TODO: implement

@@ -25,7 +25,7 @@ python scaffold.py
 - [x] **13.** eval_tensor
 - [x] **14.** conv2d
 - [x] **15.** Kernel
-- [ ] **16.** Lowerer
+- [x] **16.** Lowerer
 - [ ] **17.** ReduceLowerer
 - [ ] **18.** run_kernel_np
 - [ ] **19.** render_kernel
