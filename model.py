@@ -895,8 +895,53 @@ def run_sink(s, bufs, name="kernel"):
     call_kernel(lib, name, arrays)
     return bufs
 
-# Step 11 - shape_of (not yet solved)
-# TODO: implement
+# Step 11 - shape_of
+import functools
+import math
+
+
+def buffer(name, shape, dtype=dtypes.float32):
+    return UOp(Ops.BUFFER, dtype, (), (name, tuple(int(s) for s in shape)))
+
+
+def strides_of(shape):
+    strides = []
+    acc = 1
+    for s in reversed(shape):
+        strides.append(acc)
+        acc *= s
+    return tuple(reversed(strides))
+
+
+@functools.lru_cache(maxsize=None)
+def shape_of(u):
+    op = u.op
+    if op == Ops.BUFFER:
+        return u.arg[1]
+    if op == Ops.CONST:
+        return ()
+    if op in (Ops.RESHAPE, Ops.EXPAND):
+        return tuple(u.arg)
+    if op == Ops.PERMUTE:
+        src = shape_of(u.src[0])
+        return tuple(src[i] for i in u.arg)
+    if op == Ops.FLIP:
+        return shape_of(u.src[0])
+    if op == Ops.PAD:
+        src = shape_of(u.src[0])
+        return tuple(s + lo + hi for s, (lo, hi) in zip(src, u.arg))
+    if op == Ops.SHRINK:
+        src = shape_of(u.src[0])
+        return tuple(e - b for s, (b, e) in zip(src, u.arg))
+    if op == Ops.REDUCE_AXIS:
+        src = shape_of(u.src[0])
+        _, axes = u.arg
+        return tuple(1 if i in axes else s for i, s in enumerate(src))
+    if op == Ops.WHERE:
+        return shape_of(u.src[1])
+    if op in ALU:
+        return shape_of(u.src[0])
+    raise NotImplementedError(f"shape_of: {op}")
 
 # Step 12 - Tensor (not yet solved)
 # TODO: implement
