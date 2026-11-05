@@ -16,7 +16,7 @@ python scaffold.py
 - [x] **4.** graph_rewrite
 - [x] **5.** exec_alu
 - [x] **6.** fold_div
-- [ ] **7.** make_symbolic
+- [x] **7.** make_symbolic
 - [ ] **8.** render_sink
 - [ ] **9.** eval_sink
 - [ ] **10.** compile_c

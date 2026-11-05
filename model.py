@@ -581,8 +581,32 @@ def fold_max(x, y):
         return y
     return None
 
-# Step 7 - make_symbolic (not yet solved)
-# TODO: implement
+# Step 7 - make_symbolic
+def make_symbolic():
+    return basic_rules() + PatternMatcher([
+        # fold_div on IDIV of an int32 expression by a constant
+        (UPat(Ops.IDIV, src=(UPat.var('x', dtype=dtypes.int32), UPat.cvar('c'))),
+         lambda x, c: fold_div(x, c)),
+
+        # fold_mod on MOD likewise
+        (UPat(Ops.MOD, src=(UPat.var('x', dtype=dtypes.int32), UPat.cvar('c'))),
+         lambda x, c: fold_mod(x, c)),
+
+        # fold_cmplt on CMPLT whose left operand is int32
+        (UPat(Ops.CMPLT, src=(UPat.var('x', dtype=dtypes.int32), UPat.var('y'))),
+         lambda x, y: fold_cmplt(x, y)),
+
+        # fold_max on MAX with an int32 left operand
+        (UPat(Ops.MAX, src=(UPat.var('x', dtype=dtypes.int32), UPat.var('y'))),
+         lambda x, y: fold_max(x, y)),
+    ])
+
+
+symbolic = make_symbolic()
+
+
+def simplify(u):
+    return graph_rewrite(u, symbolic)
 
 # Step 8 - render_sink (not yet solved)
 # TODO: implement
