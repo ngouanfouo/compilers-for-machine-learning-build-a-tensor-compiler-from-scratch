@@ -23,7 +23,7 @@ python scaffold.py
 - [x] **11.** shape_of
 - [x] **12.** Tensor
 - [x] **13.** eval_tensor
-- [ ] **14.** conv2d
+- [x] **14.** conv2d
 - [ ] **15.** Kernel
 - [ ] **16.** Lowerer
 - [ ] **17.** ReduceLowerer

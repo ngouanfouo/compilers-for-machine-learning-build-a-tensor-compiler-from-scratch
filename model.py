@@ -1339,8 +1339,38 @@ def eval_tensor(u, bufs, cache=None):
     cache[u] = arr
     return arr
 
-# Step 14 - conv2d (not yet solved)
-# TODO: implement
+# Step 14 - conv2d
+def conv2d(x, w, pad=0):
+    N, Cin, H, W = x.shape
+    Cout, Cin2, kh, kw = w.shape
+    assert Cin == Cin2
+    Ho = H + 2 * pad - kh + 1
+    Wo = W + 2 * pad - kw + 1
+
+    # pad the two spatial axes (identity when pad == 0, so no PAD node)
+    xp = x.pad(((0, 0), (0, 0), (pad, pad), (pad, pad)))
+
+    total = None
+    for dh in range(kh):
+        for dw in range(kw):
+            # shifted window of the padded input -> (N, 1, Cin, Ho, Wo) -> (N, Cout, Cin, Ho, Wo)
+            win = xp.shrink(((0, N), (0, Cin), (dh, dh + Ho), (dw, dw + Wo)))
+            win = win.reshape(N, 1, Cin, Ho, Wo)
+            win = win.expand(N, Cout, Cin, Ho, Wo)
+
+            # the matching weight tap -> (1, Cout, Cin, 1, 1) -> (N, Cout, Cin, Ho, Wo)
+            wt = w.shrink(((0, Cout), (0, Cin), (dh, dh + 1), (dw, dw + 1)))
+            wt = wt.reshape(1, Cout, Cin, 1, 1)
+            wt = wt.expand(N, Cout, Cin, Ho, Wo)
+
+            prod = win * wt
+            total = prod if total is None else total + prod
+
+    # single reduce over the input channels: (N, Cout, Cin, Ho, Wo) -> (N, Cout, Ho, Wo)
+    return total.sum(2)
+
+
+Tensor.conv2d = conv2d
 
 # Step 15 - Kernel (not yet solved)
 # TODO: implement
